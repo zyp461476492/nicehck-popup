@@ -127,7 +127,10 @@ public final class NiceHckClient {
         reader.setDaemon(true);
         reader.start();
 
-        writeFrame(out, Frame.queryBattery());
+        if (!writeFrame(out, Frame.queryBattery())) {
+            DebugLog.w("RFCOMM", "first query failed, closing channel");
+            closeSocket();
+        }
         while (running) {
             try {
                 Thread.sleep(POLL_INTERVAL_MS);
@@ -137,7 +140,13 @@ public final class NiceHckClient {
             if (!running) {
                 break;
             }
-            writeFrame(out, Frame.queryBattery());
+            if (!writeFrame(out, Frame.queryBattery())) {
+                // Close the channel so the blocked reader wakes up and reports the
+                // disconnect exactly once; do not clear `running` here.
+                DebugLog.w("RFCOMM", "poll write failed, closing channel");
+                closeSocket();
+                break;
+            }
         }
 
         closeSocket();
@@ -151,8 +160,8 @@ public final class NiceHckClient {
 
     private void readLoop(InputStream in, FrameDecoder decoder) {
         byte[] buf = new byte[READ_BUFFER];
-        while (running) {
-            try {
+        try {
+            while (running) {
                 int n = in.read(buf);
                 if (n <= 0) {
                     continue;
@@ -162,16 +171,22 @@ public final class NiceHckClient {
                 for (Frame frame : frames) {
                     handle(frame);
                 }
-            } catch (IOException ioe) {
-                if (running) {
-                    DebugLog.w("RFCOMM", "read failed: " + ioe);
-                    callback.onDisconnected("连接断开: " + ioe.getMessage());
-                }
-                return;
-            } catch (SecurityException se) {
-                DebugLog.e("RFCOMM", "read denied: " + se.getMessage());
-                return;
             }
+        } catch (IOException ioe) {
+            if (running) {
+                DebugLog.w("RFCOMM", "read failed: " + ioe);
+                callback.onDisconnected("连接断开: " + ioe.getMessage());
+            }
+        } catch (SecurityException se) {
+            if (running) {
+                DebugLog.e("RFCOMM", "read denied: " + se.getMessage());
+            }
+        } finally {
+            // Whichever side noticed first, the session is over: stop the poll
+            // ticker and release the channel.
+            running = false;
+            closeSocket();
+            DebugLog.i("RFCOMM", "reader exited");
         }
     }
 
@@ -188,13 +203,15 @@ public final class NiceHckClient {
         callback.onFrame(frame);
     }
 
-    private void writeFrame(OutputStream out, byte[] frame) {
+    private boolean writeFrame(OutputStream out, byte[] frame) {
         try {
             out.write(frame);
             out.flush();
             DebugLog.i("TX", DebugLog.hex(frame, frame.length));
+            return true;
         } catch (IOException ioe) {
             DebugLog.w("TX", "write failed: " + ioe.getMessage());
+            return false;
         }
     }
 
