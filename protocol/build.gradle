@@ -1,0 +1,22 @@
+plugins {
+    id 'java-library'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+/**
+ * Runs the zero-dependency protocol self test on a plain JVM.
+ *
+ * Locally, without any Android SDK or Gradle:
+ *   javac -d /tmp/out protocol/src/main/java/dev/nhp/protocol/*.java
+ *   java  -cp /tmp/out dev.nhp.protocol.ProtocolSelfTest
+ */
+tasks.register('selftest', JavaExec) {
+    group = 'verification'
+    description = 'Run the protocol self test on a plain JVM'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'dev.nhp.protocol.ProtocolSelfTest'
+}
