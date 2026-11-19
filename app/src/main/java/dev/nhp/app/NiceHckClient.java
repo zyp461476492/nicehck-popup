@@ -199,30 +199,33 @@ public final class NiceHckClient {
     }
 
     /**
-     * Secure SDP lookup first; some firmwares only answer an insecure socket, so
-     * fall back instead of giving up.
+     * Insecure socket first: on the OriG in the SDP record is often missing right
+     * after connecting (secure open fails after ~400 ms) while the insecure
+     * channel answers immediately. Measured on device: secure succeeded only
+     * intermittently, so leading with insecure removes both the latency and the
+     * flakiness.
      */
     private BluetoothSocket openSocket(BluetoothDevice device) throws IOException {
-        BluetoothSocket secure = null;
-        try {
-            secure = device.createRfcommSocketToServiceRecord(SPP_UUID);
-            secure.connect();
-            DebugLog.i("RFCOMM", "secure SPP channel open");
-            return secure;
-        } catch (IOException first) {
-            DebugLog.w("RFCOMM", "secure failed (" + first.getMessage() + "), trying insecure");
-            closeQuietly(secure);
-        }
-
         BluetoothSocket insecure = null;
         try {
             insecure = device.createInsecureRfcommSocketToServiceRecord(SPP_UUID);
             insecure.connect();
             DebugLog.i("RFCOMM", "insecure SPP channel open");
             return insecure;
-        } catch (IOException second) {
-            DebugLog.e("RFCOMM", "insecure failed too: " + second.getMessage());
+        } catch (IOException first) {
+            DebugLog.w("RFCOMM", "insecure failed (" + first.getMessage() + "), trying secure");
             closeQuietly(insecure);
+        }
+
+        BluetoothSocket secure = null;
+        try {
+            secure = device.createRfcommSocketToServiceRecord(SPP_UUID);
+            secure.connect();
+            DebugLog.i("RFCOMM", "secure SPP channel open");
+            return secure;
+        } catch (IOException second) {
+            DebugLog.e("RFCOMM", "secure failed too: " + second.getMessage());
+            closeQuietly(secure);
             throw second;
         }
     }

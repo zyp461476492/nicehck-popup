@@ -28,6 +28,7 @@ public final class ProtocolSelfTest {
         testCaseUnknownKeepsLast();
         testShortBatteryFrame();
         testTruncatedFrameWaits();
+        testStatusFrame();
 
         System.out.println();
         System.out.println("passed=" + passed + " failed=" + failed);
@@ -159,6 +160,22 @@ public final class ProtocolSelfTest {
         check("truncated: buffered", decoder.bufferedBytes() == 4);
         List<Frame> rest = decoder.offer(new byte[] {wire[4], wire[5], wire[6], wire[7], wire[8]});
         check("truncated: completed later", rest.size() == 1);
+    }
+
+    private static void testStatusFrame() {
+        StatusFrame closedBothIn = StatusFrame.from(new Frame(NiceHckOps.STATUS, params(1, 2, 2, 2)));
+        check("status parsed", closedBothIn != null);
+        check("status lid closed", closedBothIn != null && !closedBothIn.lidOpen());
+        check("status buds in", closedBothIn != null && !closedBothIn.budsOut());
+
+        StatusFrame openBudOut = StatusFrame.from(new Frame(NiceHckOps.STATUS, params(1, 3, 2, 3)));
+        check("status lid open", openBudOut != null && openBudOut.lidOpen());
+        check("status buds out", openBudOut != null && openBudOut.budsOut());
+
+        check("status short frame rejected",
+                StatusFrame.from(new Frame(NiceHckOps.STATUS, params(1, 2))) == null);
+        check("status wrong opcode rejected",
+                StatusFrame.from(new Frame(NiceHckOps.BATTERY, params(1, 2, 3, 4))) == null);
     }
 
     // --- helpers --------------------------------------------------------

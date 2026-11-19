@@ -14,6 +14,17 @@ public final class NiceHckOps {
     /** Battery report: params = left, right, case (percent 1..100, 0 = unknown). */
     public static final int BATTERY = 0x0005;
 
+    /**
+     * Periodic status report, params = 4 bytes.
+     *
+     * <p>Calibrated on real hardware (OriG in) against lid and bud movement:
+     * {@code params[1]}: 0x02 = lid closed, 0x03 = lid open;
+     * {@code params[3]}: 0x02 = both buds in the case, 0x03 = at least one bud out.
+     * {@code params[0]} and {@code params[2]} were constant (0x01 / 0x02).
+     * The case battery byte also reports 0 while a bud is out.
+     */
+    public static final int STATUS = 0x0006;
+
     /** Firmware version. */
     public static final int VERSION = 0x0003;
 
@@ -33,6 +44,8 @@ public final class NiceHckOps {
         switch (opcode) {
             case BATTERY:
                 return "BATTERY";
+            case STATUS:
+                return "STATUS";
             case VERSION:
                 return "VERSION";
             case NOISE_QUERY:

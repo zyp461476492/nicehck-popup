@@ -8,17 +8,24 @@ import android.bluetooth.BluetoothManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.CompoundButton;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -26,27 +33,34 @@ import dev.nhp.protocol.BatteryLevels;
 import dev.nhp.protocol.Frame;
 
 /**
- * M1 harness: connect to the bonded NiceHCK earbuds, poll the battery opcode and
- * show everything on screen (there is no logcat in this build/install flow).
+ * Control panel: the auto-popup switch (M3), permission guidance, plus the M1
+ * manual harness kept around for diagnostics.
  */
 public class MainActivity extends Activity {
 
     private static final int REQ_PERMS = 1001;
-    private static final String[] PERMS = {Manifest.permission.BLUETOOTH_CONNECT};
+    private static final String PREFS = "settings";
+    private static final String KEY_AUTO = "auto_popup";
 
     private static final int BG = 0xFF101014;
     private static final int FG = 0xFFEDEDF0;
     private static final int DIM = 0xFF9A9AA5;
     private static final int ACCENT = 0xFF6FD3A0;
 
+    private SharedPreferences prefs;
+
     private TextView statusView;
     private TextView batteryView;
     private TextView logView;
     private ScrollView logScroll;
+    private Switch autoSwitch;
     private Button connectButton;
     private Button disconnectButton;
+    private Button overlayButton;
+    private Button notifyButton;
 
     private NiceHckClient client;
+    private boolean autoMode;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -74,8 +88,26 @@ public class MainActivity extends Activity {
         logView.setText(DebugLog.dump());
         setStatus("未连接");
         setBatteryText("L --　R --　CASE --");
-        DebugLog.i("APP", "M1 harness ready (protocol layer 0x0005)");
-        ensurePermission();
+        DebugLog.i("APP", "M3 control panel ready");
+
+        prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        autoMode = prefs.getBoolean(KEY_AUTO, false);
+        autoSwitch.setChecked(autoMode);
+        autoSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                onAutoModeChanged(isChecked);
+            }
+        });
+
+        updatePermissionHints();
+        ensurePermissions();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        updatePermissionHints();
     }
 
     @Override
@@ -90,14 +122,25 @@ public class MainActivity extends Activity {
 
     // --- permissions ----------------------------------------------------
 
-    private void ensurePermission() {
-        if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
-                != PackageManager.PERMISSION_GRANTED) {
-            DebugLog.w("PERM", "requesting BLUETOOTH_CONNECT");
-            requestPermissions(PERMS, REQ_PERMS);
-        } else {
-            DebugLog.i("PERM", "BLUETOOTH_CONNECT granted");
+    private void ensurePermissions() {
+        java.util.List<String> needed = new java.util.ArrayList<String>();
+        if (!hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
+            needed.add(Manifest.permission.BLUETOOTH_CONNECT);
         }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && !hasPermission(Manifest.permission.POST_NOTIFICATIONS)) {
+            needed.add(Manifest.permission.POST_NOTIFICATIONS);
+        }
+        if (needed.isEmpty()) {
+            DebugLog.i("PERM", "all runtime permissions granted");
+            return;
+        }
+        DebugLog.w("PERM", "requesting: " + needed);
+        requestPermissions(needed.toArray(new String[0]), REQ_PERMS);
+    }
+
+    private boolean hasPermission(String permission) {
+        return checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED;
     }
 
     @Override
@@ -107,23 +150,67 @@ public class MainActivity extends Activity {
         if (requestCode != REQ_PERMS) {
             return;
         }
-        boolean granted = grantResults.length > 0
-                && grantResults[0] == PackageManager.PERMISSION_GRANTED;
-        if (granted) {
-            DebugLog.i("PERM", "granted");
-        } else {
-            DebugLog.e("PERM", "denied");
-            toast("需要「附近设备」权限才能读取电量");
+        for (int i = 0; i < permissions.length && i < grantResults.length; i++) {
+            boolean granted = grantResults[i] == PackageManager.PERMISSION_GRANTED;
+            DebugLog.i("PERM", permissions[i] + " = " + (granted ? "granted" : "denied"));
         }
     }
 
-    // --- connect --------------------------------------------------------
+    private void updatePermissionHints() {
+        if (overlayButton != null) {
+            boolean ok = PopupOverlay.canShow(this);
+            overlayButton.setText(ok ? "悬浮窗 ✓" : "悬浮窗 ✗");
+        }
+        if (notifyButton != null) {
+            boolean ok = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU
+                    || hasPermission(Manifest.permission.POST_NOTIFICATIONS);
+            notifyButton.setText(ok ? "通知 ✓" : "通知 ✗");
+        }
+    }
+
+    // --- auto mode ------------------------------------------------------
+
+    private void onAutoModeChanged(boolean enabled) {
+        autoMode = enabled;
+        prefs.edit().putBoolean(KEY_AUTO, enabled).apply();
+        if (enabled) {
+            startEarbudsService();
+        } else {
+            stopService(new Intent(this, EarbudsService.class));
+            DebugLog.i("APP", "auto mode off, service stopped");
+        }
+        updateManualControls();
+    }
+
+    private void startEarbudsService() {
+        Intent intent = new Intent(this, EarbudsService.class);
+        intent.setAction(EarbudsService.ACTION_START);
+        intent.putExtra(EarbudsService.EXTRA_POPUP, true);
+        try {
+            startForegroundService(intent);
+            DebugLog.i("APP", "auto mode on, service started");
+        } catch (RuntimeException e) {
+            DebugLog.e("APP", "startForegroundService failed: " + e);
+            toast("启动后台服务失败: " + e.getMessage());
+        }
+        updateManualControls();
+    }
+
+    private void updateManualControls() {
+        boolean manualAllowed = !autoMode;
+        connectButton.setEnabled(manualAllowed);
+        disconnectButton.setEnabled(manualAllowed && client != null);
+        if (autoMode) {
+            setStatus("自动模式运行中（后台监听连接）");
+        }
+    }
+
+    // --- manual harness -------------------------------------------------
 
     private void connect() {
-        if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
-                != PackageManager.PERMISSION_GRANTED) {
-            toast("请先授予蓝牙权限");
-            ensurePermission();
+        if (!hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
+            toast("请先授予「附近设备」权限");
+            ensurePermissions();
             return;
         }
 
@@ -145,7 +232,7 @@ public class MainActivity extends Activity {
         if (device == null) {
             DebugLog.e("BT", "no NiceHCK device in bonded list: "
                     + DeviceFinder.describeAll(adapter));
-            toast("已配对列表里没有找到原道耳机，请先在系统设置里配对");
+            toast("已配对列表里没有找到原道耳机");
             return;
         }
 
@@ -180,7 +267,7 @@ public class MainActivity extends Activity {
 
             @Override
             public void onFrame(Frame frame) {
-                // already logged by the client
+                // logged by the client already
             }
 
             @Override
@@ -189,7 +276,7 @@ public class MainActivity extends Activity {
                     @Override
                     public void run() {
                         setStatus("未连接 (" + reason + ")");
-                        connectButton.setEnabled(true);
+                        connectButton.setEnabled(!autoMode);
                         disconnectButton.setEnabled(false);
                     }
                 });
@@ -207,7 +294,7 @@ public class MainActivity extends Activity {
             client = null;
         }
         setStatus("未连接");
-        connectButton.setEnabled(true);
+        connectButton.setEnabled(!autoMode);
         disconnectButton.setEnabled(false);
         DebugLog.i("APP", "stopped by user");
     }
@@ -228,16 +315,54 @@ public class MainActivity extends Activity {
         return "--";
     }
 
+    // --- permission shortcuts -------------------------------------------
+
+    private void requestOverlay() {
+        if (PopupOverlay.canShow(this)) {
+            toast("悬浮窗权限已开启");
+            return;
+        }
+        try {
+            Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:" + getPackageName()));
+            startActivity(intent);
+            toast("请开启「显示在其他应用上层」");
+        } catch (RuntimeException e) {
+            DebugLog.e("PERM", "overlay settings failed: " + e);
+        }
+    }
+
+    private void requestNotification() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && !hasPermission(Manifest.permission.POST_NOTIFICATIONS)) {
+            requestPermissions(
+                    new String[] {Manifest.permission.POST_NOTIFICATIONS}, REQ_PERMS);
+            return;
+        }
+        toast("通知权限已开启");
+    }
+
+    private void openAppDetails() {
+        try {
+            Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:" + getPackageName()));
+            startActivity(intent);
+            toast("请打开「后台弹出界面」和「自启动」");
+        } catch (RuntimeException e) {
+            DebugLog.e("PERM", "app details failed: " + e);
+        }
+    }
+
     // --- ui -------------------------------------------------------------
 
     private View buildUi() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(BG);
-        root.setPadding(dp(18), dp(28), dp(18), dp(18));
+        root.setPadding(dp(16), dp(24), dp(16), dp(16));
 
         TextView title = new TextView(this);
-        title.setText("原道电量读取 · M1");
+        title.setText("原道电量弹窗");
         title.setTextColor(FG);
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
         title.setTypeface(Typeface.DEFAULT_BOLD);
@@ -247,55 +372,76 @@ public class MainActivity extends Activity {
         subtitle.setText("NiceHCK / YuanDao · RFCOMM 0x0005");
         subtitle.setTextColor(DIM);
         subtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
-        root.addView(subtitle, verticalParams(2, 0, 0, 0));
+        root.addView(subtitle, topParams(2));
+
+        autoSwitch = new Switch(this);
+        autoSwitch.setText("连接耳机时自动弹窗");
+        autoSwitch.setTextColor(FG);
+        autoSwitch.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        root.addView(autoSwitch, topParams(14));
 
         statusView = new TextView(this);
         statusView.setTextColor(DIM);
-        statusView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        root.addView(statusView, verticalParams(12, 0, 0, 0));
+        statusView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        root.addView(statusView, topParams(10));
 
         batteryView = new TextView(this);
         batteryView.setTextColor(ACCENT);
-        batteryView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+        batteryView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
         batteryView.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
         batteryView.setGravity(Gravity.CENTER);
-        root.addView(batteryView, verticalParams(18, 0, 0, 0));
+        root.addView(batteryView, topParams(12));
 
-        LinearLayout buttons = new LinearLayout(this);
-        buttons.setOrientation(LinearLayout.HORIZONTAL);
-
-        connectButton = makeButton("连接并读电量", new View.OnClickListener() {
+        LinearLayout row1 = new LinearLayout(this);
+        row1.setOrientation(LinearLayout.HORIZONTAL);
+        connectButton = makeButton("手动连接读电量", 0, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 connect();
             }
         });
-        disconnectButton = makeButton("断开", new View.OnClickListener() {
+        disconnectButton = makeButton("断开", 0, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 disconnect();
             }
         });
         disconnectButton.setEnabled(false);
-        Button copyButton = makeButton("复制日志", new View.OnClickListener() {
+        addWeighted(row1, connectButton, 1.7f);
+        addWeighted(row1, disconnectButton, 1f);
+        root.addView(row1, topParams(14));
+
+        LinearLayout row2 = new LinearLayout(this);
+        row2.setOrientation(LinearLayout.HORIZONTAL);
+        overlayButton = makeButton("悬浮窗", 11, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                requestOverlay();
+            }
+        });
+        notifyButton = makeButton("通知", 11, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                requestNotification();
+            }
+        });
+        Button detailsButton = makeButton("后台权限", 11, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openAppDetails();
+            }
+        });
+        Button copyButton = makeButton("复制日志", 11, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 copyLog();
             }
         });
-        Button clearButton = makeButton("清空", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                DebugLog.clear();
-                logView.setText("");
-            }
-        });
-
-        addWeighted(buttons, connectButton, 1.6f);
-        addWeighted(buttons, disconnectButton, 1f);
-        addWeighted(buttons, copyButton, 1f);
-        addWeighted(buttons, clearButton, 1f);
-        root.addView(buttons, verticalParams(18, 0, 0, 0));
+        addWeighted(row2, overlayButton, 1f);
+        addWeighted(row2, notifyButton, 1f);
+        addWeighted(row2, detailsButton, 1f);
+        addWeighted(row2, copyButton, 1f);
+        root.addView(row2, topParams(6));
 
         logScroll = new ScrollView(this);
         logScroll.setBackgroundColor(0xFF08080A);
@@ -311,17 +457,17 @@ public class MainActivity extends Activity {
 
         LinearLayout.LayoutParams logParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
-        logParams.topMargin = dp(18);
+        logParams.topMargin = dp(14);
         root.addView(logScroll, logParams);
 
         return root;
     }
 
-    private Button makeButton(String text, View.OnClickListener listener) {
+    private Button makeButton(String text, int textSp, View.OnClickListener listener) {
         Button button = new Button(this);
         button.setText(text);
         button.setAllCaps(false);
-        button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        button.setTextSize(TypedValue.COMPLEX_UNIT_SP, textSp > 0 ? textSp : 13);
         button.setOnClickListener(listener);
         return button;
     }
@@ -333,15 +479,11 @@ public class MainActivity extends Activity {
         parent.addView(child, lp);
     }
 
-    private LinearLayout.LayoutParams verticalParams(int topDp, int bottomDp,
-                                                     int leftDp, int rightDp) {
+    private LinearLayout.LayoutParams topParams(int topDp) {
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.topMargin = dp(topDp);
-        lp.bottomMargin = dp(bottomDp);
-        lp.leftMargin = dp(leftDp);
-        lp.rightMargin = dp(rightDp);
         return lp;
     }
 

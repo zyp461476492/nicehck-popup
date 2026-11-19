@@ -2,6 +2,8 @@ package dev.nhp.app;
 
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothManager;
+import android.bluetooth.BluetoothProfile;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -51,6 +53,54 @@ public final class DeviceFinder {
             return medium;
         }
         return firstMatching(devices, WEAK);
+    }
+
+    /** True when the name looks like a NiceHCK / YuanDao product. */
+    public static boolean matches(String name) {
+        String normalized = normalize(name);
+        if (normalized.isEmpty()) {
+            return false;
+        }
+        return containsAny(normalized, STRONG)
+                || containsAny(normalized, MEDIUM)
+                || containsAny(normalized, WEAK);
+    }
+
+    private static boolean containsAny(String normalized, String[] needles) {
+        for (String needle : needles) {
+            if (normalized.contains(needle)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The NiceHCK device that is connected right now, or null.
+     *
+     * <p>{@code BluetoothDevice.isConnected()} is a hidden API, so the public
+     * {@link BluetoothManager#getConnectedDevices(int)} route is used instead.
+     */
+    public static BluetoothDevice findConnected(BluetoothManager manager) {
+        if (manager == null) {
+            return null;
+        }
+        List<BluetoothDevice> connected;
+        try {
+            connected = manager.getConnectedDevices(BluetoothProfile.A2DP);
+        } catch (SecurityException se) {
+            DebugLog.e("BOND", "getConnectedDevices denied: " + se.getMessage());
+            return null;
+        } catch (RuntimeException e) {
+            DebugLog.e("BOND", "getConnectedDevices failed: " + e);
+            return null;
+        }
+        for (BluetoothDevice device : connected) {
+            if (matches(safeName(device))) {
+                return device;
+            }
+        }
+        return null;
     }
 
     private static BluetoothDevice firstMatching(List<BluetoothDevice> devices, String[] needles) {
